@@ -1,10 +1,10 @@
-# Sara TUI
+# SARA TUI
 
-[Sara](https://github.com/cledouarec/sara) の要件・設計文書を端末で検索し、本文や関連文書をたどれる Rust 製の TUI。
+[SARA](https://github.com/cledouarec/sara) の要件・設計文書を端末で検索し、本文や関連文書をたどれる Rust 製の TUI。
 
 ## 起動する
 
-`sara` 0.12.3 と Rust 1.88 以降を使う。本文の表示には `leaf` を `PATH` に用意する。編集には `$EDITOR` を使い、空か未設定の場合は `vim` を使う。 [leaf のインストール手順](https://github.com/RivoLink/leaf#installation)
+`SARA` 0.12.3 と Rust 1.88 以降を使う。本文の表示には `leaf` を `PATH` に用意する。編集には `$EDITOR` を使い、空か未設定の場合は `vim` を使う。 [leaf のインストール手順](https://github.com/RivoLink/leaf#installation)
 
 普段使う場合は、このリポジトリのルートで一度インストールする。
 

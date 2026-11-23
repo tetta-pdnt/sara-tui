@@ -1,4 +1,4 @@
-# SARA TUI
+# SARA-TUI
 
 [SARA](https://github.com/cledouarec/sara) の要件・設計文書を端末で検索し、本文や関連文書をたどれる Rust 製の TUI。
 

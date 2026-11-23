@@ -4,19 +4,29 @@
 
 ## 起動する
 
-`SARA` 0.12.3 と Rust 1.88 以降を使う。本文の表示には `leaf` を `PATH` に用意する。編集には `$EDITOR` を使い、空か未設定の場合は `vim` を使う。 [leaf のインストール手順](https://github.com/RivoLink/leaf#installation)
+Homebrew では、SARA CLI と Leaf もまとめてインストールできる。
 
-普段使う場合は、このリポジトリのルートで一度インストールする。
+```sh
+brew install tetta-pdnt/tap/sara-cli tetta-pdnt/tap/sara-tui
+```
+
+`sara-tui` で起動する。`--project` に `sara.toml` があるディレクトリを指定できる。省略時は作業ディレクトリを使う。
+
+```sh
+sara-tui --project /path/to/project
+```
+
+編集には `$EDITOR` を使い、空か未設定の場合は `vim` を使う。
+
+### Cargo からインストールする
+
+このリポジトリのルートで Rust 1.88 以降を使ってインストールする。`sara` 0.12.3 と `leaf` を `PATH` に用意する。 [leaf のインストール手順](https://github.com/RivoLink/leaf#installation)
 
 ```sh
 cargo install --locked --path .
 ```
 
-Cargo のインストール先の `bin` が `PATH` にあれば、`sara-tui` で起動できる。`--project` に `sara.toml` があるディレクトリを指定できる。省略時は作業ディレクトリを使う。
-
-```sh
-sara-tui --project /path/to/project
-```
+Cargo のインストール先の `bin` を `PATH` に追加すると、`sara-tui` で起動できる。
 
 ソースから直接起動する場合は、リポジトリのルートで次のコマンドを実行する。
 

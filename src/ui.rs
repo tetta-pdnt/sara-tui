@@ -1,13 +1,14 @@
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, HighlightSpacing, List, ListItem, Paragraph, Wrap,
+    Block, BorderType, Borders, Clear, HighlightSpacing, List, ListItem, Padding, Paragraph, Wrap,
 };
 use ratatui::Frame;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::app::{App, Overlay, Pane, Scroll};
+use crate::app::{App, BodyTab, Overlay, Pane, Scroll};
+use crate::markdown::{MermaidDiagram, RenderedMarkdown};
 use crate::sara::{Direction, Field, Item};
 use crate::tree::RowKind;
 
@@ -21,6 +22,8 @@ const SELECTION: Style = Style::new().fg(FOREGROUND).bg(SELECTED_BACKGROUND);
 const LIST_PADDING: &str = "  ";
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    app.body_area = Rect::ZERO;
+    app.body_links.clear();
     let area = frame.area();
     frame.render_widget(
         Block::default().style(Style::new().fg(FOREGROUND).bg(BACKGROUND)),
@@ -126,7 +129,7 @@ fn help_window(area: Rect) -> Rect {
 
 fn draw_search(frame: &mut Frame, value: &str, area: Rect) {
     let line = Line::from(vec![
-        Span::styled(" / ", Style::new().fg(ACCENT).bold()),
+        Span::styled(" Search ", Style::new().fg(ACCENT).bold()),
         Span::raw(value),
     ]);
     let width = u16::try_from(line.width()).unwrap_or(u16::MAX);
@@ -158,17 +161,17 @@ fn navigation_list<'a>(items: Vec<ListItem<'a>>, block: Block<'static>) -> List<
 
 fn draw_items(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.pane == Pane::Items && app.search.is_none();
-    let mut title = format!(" 1 文書  {} 件 ", app.tree.count);
+    let mut title = format!(" [1] Items  {} ", app.tree.count);
     if !app.query.is_empty() {
         title.push_str(&format!(" 「{}」 ", app.query));
     }
-    let block = panel(title, focused);
+    let block = panel(title, focused).padding(Padding::right(2));
     let inner = block.inner(area);
     app.items_height = inner.height;
     let row_width = usize::from(inner.width).saturating_sub(Span::raw(LIST_PADDING).width());
     if app.tree.count == 0 {
         frame.render_widget(
-            Paragraph::new("該当する文書がありません。\n/ で検索条件を変更できます。").block(block),
+            Paragraph::new("No matching items.\nPress / to search.").block(block),
             area,
         );
         return;
@@ -236,39 +239,143 @@ fn group_line(mut label: String, count: usize, width: usize) -> Line<'static> {
 
 fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.pane == Pane::Body && app.search.is_none();
-    let Some(item) = &app.item else {
-        frame.render_widget(
-            Paragraph::new("文書を選ぶと本文を表示します。").block(panel(" 2 本文 ", focused)),
-            area,
-        );
-        return;
-    };
-    let title = format!(" 2 本文  {}  {} ", item.id, item.type_name);
+    let mut title = Line::from(" [2] ");
+    title.spans.extend(BodyTab::ALL.map(|tab| {
+        let style = match (focused, tab == app.body_tab) {
+            (true, true) => SELECTION.bold(),
+            (true, false) => Style::new().fg(MUTED),
+            (false, true) => Style::new().fg(MUTED).bg(Color::Rgb(35, 40, 70)).bold(),
+            (false, false) => Style::new().fg(Color::Rgb(106, 117, 148)),
+        };
+        Span::styled(format!("{} ", tab.label()), style)
+    }));
+    if let Some(item) = &app.item {
+        let width = usize::from(area.width.saturating_sub(2));
+        for label in [format!("{} ", item.id), format!(" {} ", item.type_name)] {
+            let label = Span::raw(label);
+            if title.width() + label.width() > width {
+                break;
+            }
+            title.spans.push(label);
+        }
+    }
     let block = panel(title, focused);
     let inner = block.inner(area);
-    let markdown = item.body.as_deref().filter(|body| !body.trim().is_empty());
-    let preview = markdown.map(|body| app.markdown.at_width(body, inner.width));
-    let text = item_text(item, preview);
     frame.render_widget(block, area);
+
+    let inner = if app.body_tab == BodyTab::Body {
+        inner.inner(Margin::new(1, 1))
+    } else {
+        inner
+    };
+    app.body_area = inner;
+    if inner.is_empty() {
+        return;
+    }
+    if let Some(trace) = app.trace_view() {
+        match trace {
+            Ok(trace) => {
+                let limit = trace.width.saturating_sub(usize::from(inner.width));
+                let left = trace.left.get_or_insert(limit / 2);
+                *left = (*left).min(limit);
+                trace
+                    .scroll
+                    .set_viewport(trace.diagram.text.height(), inner.height);
+                trace.visible_nodes.clear();
+                draw_diagram(
+                    frame,
+                    inner,
+                    &trace.diagram,
+                    *left,
+                    trace.scroll.offset,
+                    &mut trace.visible_nodes,
+                );
+            }
+            Err(error) => frame.render_widget(
+                Paragraph::new(error.as_str())
+                    .style(Style::new().fg(Color::LightRed))
+                    .wrap(Wrap { trim: false }),
+                inner,
+            ),
+        }
+        return;
+    }
+
+    let Some(item) = &app.item else {
+        frame.render_widget(Paragraph::new("Select an item to view its body."), inner);
+        return;
+    };
+    let markdown = item.body.as_deref().unwrap_or_default();
+    let preview = app.markdown.at_width(&item.name, markdown, inner.width);
+    let (text, markdown_start) = item_text(item, preview, inner.width);
+    let missing_anchor = app.body_anchor.take().and_then(|anchor| {
+        if anchor.is_empty() || preview.title_anchor.as_deref() == Some(&anchor) {
+            app.body_scroll.offset = 0;
+        } else if let Some(line) = preview.headings.get(&anchor) {
+            let preceding = Text::from(text.lines[..markdown_start + line].to_vec());
+            let offset = Paragraph::new(preceding)
+                .wrap(Wrap { trim: false })
+                .line_count(inner.width);
+            app.body_scroll.offset = u16::try_from(offset).unwrap_or(u16::MAX);
+        } else {
+            return Some(anchor);
+        }
+        None
+    });
     draw_scroll(frame, inner, text, &mut app.body_scroll);
+    if preview.has_links() {
+        collect_body_links(frame, inner, &mut app.body_links);
+    }
+    if let Some(anchor) = missing_anchor {
+        app.report_error(Err(anyhow::anyhow!(
+            "リンク先の見出しが見つかりません（{anchor}）"
+        )));
+    }
 }
 
-fn item_text<'a>(item: &'a Item, preview: Option<&Text<'static>>) -> Text<'a> {
-    let mut lines = vec![
-        Line::styled(item.name.as_str(), Style::new().bold()),
+fn collect_body_links(frame: &mut Frame, area: Rect, links: &mut Vec<(Rect, usize)>) {
+    let buffer = frame.buffer_mut();
+    for position in area.positions() {
+        let cell = &mut buffer[position];
+        let Color::Rgb(r, g, b) = cell.underline_color else {
+            continue;
+        };
+        let index = (usize::from(r) << 16) | (usize::from(g) << 8) | usize::from(b);
+        cell.underline_color = Color::Reset;
+        let width = (Span::raw(cell.symbol()).width() as u16).min(area.right() - position.x);
+        if let Some((last, last_index)) = links.last_mut() {
+            if *last_index == index && last.y == position.y && last.right() == position.x {
+                last.width += width;
+                continue;
+            }
+        }
+        links.push((Rect::new(position.x, position.y, width, 1), index));
+    }
+}
+
+fn item_text<'a>(item: &'a Item, preview: &RenderedMarkdown, width: u16) -> (Text<'a>, usize) {
+    let mut lines = preview.title.clone();
+    lines.extend([
         Line::styled(item.file.as_str(), Style::new().fg(MUTED)),
         Line::default(),
-    ];
+    ]);
     if let Some(description) = &item.description {
         lines.extend(description.lines().map(Line::from));
         lines.push(Line::default());
     }
-    match preview {
+    let markdown_start = lines.len();
+    match &preview.body {
         Some(body) => lines.extend(body.lines.iter().cloned()),
-        None => lines.push(Line::styled(
-            "Markdown 本文は空です。",
-            Style::new().fg(MUTED),
-        )),
+        None => lines.push(Line::styled("The body is empty.", Style::new().fg(MUTED))),
+    }
+    if !item.fields.is_empty() {
+        let label = "Fields ";
+        let rule_width = usize::from(width).saturating_sub(label.len());
+        lines.extend([Line::default(), Line::default()]);
+        lines.push(Line::from(vec![
+            Span::styled(label, Style::new().fg(MUTED).bold()),
+            Span::styled("─".repeat(rule_width), Style::new().fg(SELECTED_BACKGROUND)),
+        ]));
     }
     for (label, value) in &item.fields {
         lines.push(Line::default());
@@ -280,12 +387,12 @@ fn item_text<'a>(item: &'a Item, preview: Option<&Text<'static>>) -> Text<'a> {
             }
         }
     }
-    Text::from(lines)
+    (Text::from(lines), markdown_start)
 }
 
 fn draw_links(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.pane == Pane::Links && app.search.is_none();
-    let block = panel(" 3 関連文書 ", focused);
+    let block = panel(" [3] Related Items ", focused);
     let items: Vec<_> = app
         .item
         .iter()
@@ -312,7 +419,7 @@ fn draw_links(frame: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
     if items.is_empty() {
-        frame.render_widget(Paragraph::new("関連文書はありません。").block(block), area);
+        frame.render_widget(Paragraph::new("No related items.").block(block), area);
     } else {
         let mut list = navigation_list(items, block);
         if focused {
@@ -324,7 +431,7 @@ fn draw_links(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn draw_overlay(frame: &mut Frame, area: Rect, overlay: &Overlay, scroll: &mut Scroll) {
     let (title, text) = match overlay {
-        Overlay::Help => (" キーバインド ", help_text()),
+        Overlay::Help => (" Key Bindings ", help_text()),
         Overlay::Error(message) => (" エラー ", Text::from(message.as_str())),
         Overlay::Validation(report) => {
             let status = if report.valid {
@@ -381,24 +488,85 @@ fn draw_overlay(frame: &mut Frame, area: Rect, overlay: &Overlay, scroll: &mut S
     draw_scroll(frame, inner, text, scroll);
 }
 
+fn draw_diagram(
+    frame: &mut Frame,
+    area: Rect,
+    diagram: &MermaidDiagram,
+    left: usize,
+    top: u16,
+    visible_nodes: &mut Vec<(Rect, usize)>,
+) {
+    let top = usize::from(top);
+    let right = left + usize::from(area.width);
+    let buffer = frame.buffer_mut();
+    let lines = diagram.text.lines.iter().skip(top);
+    for (y, line) in (area.top()..area.bottom()).zip(lines) {
+        let mut column = 0;
+        for grapheme in line.styled_graphemes(diagram.text.style) {
+            let width = Span::raw(grapheme.symbol).width();
+            let end = column + width;
+            // A wide glyph straddling an edge must leave its visible cells blank.
+            if end > right {
+                break;
+            }
+            if column >= left && width > 0 {
+                let x = area.left() + (column - left) as u16;
+                buffer[(x, y)]
+                    .set_symbol(grapheme.symbol)
+                    .set_style(grapheme.style);
+            }
+            column = end;
+        }
+    }
+    let visible_rows = top..top + usize::from(area.height);
+    let link_style = Style::new().fg(ACCENT).underlined();
+    for (index, node) in diagram.nodes.iter().enumerate() {
+        if !visible_rows.contains(&node.row) {
+            continue;
+        }
+        let start = node.columns.start.max(left);
+        let end = node.columns.end.min(right);
+        let y = area.top() + (node.row - top) as u16;
+        let mut hitbox = Rect::new(0, y, 0, 1);
+        for column in start..end {
+            let x = area.left() + (column - left) as u16;
+            let cell = &mut buffer[(x, y)];
+            // Blank cells include partially clipped wide glyphs.
+            if cell.symbol() == " " {
+                continue;
+            }
+            let width = Span::raw(cell.symbol()).width() as u16;
+            if hitbox.width == 0 {
+                hitbox.x = x;
+            }
+            hitbox.width = x + width - hitbox.x;
+            cell.set_style(link_style);
+        }
+        if hitbox.width > 0 {
+            visible_nodes.push((hitbox, index));
+        }
+    }
+}
+
 fn help_text() -> Text<'static> {
     let sections: &[(&str, &[(&str, &str)])] = &[
         (
             "共通",
             &[
-                ("1 / 2 / 3", "文書ツリー / 本文 / 関連文書に移る"),
+                ("1 / 2 / 3", "Items / Body / Related Items に移る"),
                 ("Tab / Shift+Tab", "前後の枠に切り替える"),
                 ("↑ ↓ / k j", "選択またはスクロールを上下する"),
                 ("Home / End", "先頭 / 末尾に移る"),
-                ("?", "キーバインド一覧を開く・閉じる"),
-                ("Esc", "絞り込みを解除して文書ツリーに戻る"),
-                ("b", "関連文書をたどる前の文書に戻る"),
-                ("r / v", "文書を読み直す / モデルを検証する"),
-                ("q / Ctrl+C", "終了する"),
+                ("gg / G", "Items / Body で先頭 / 末尾に移る"),
+                ("?", "Key Bindings を開く・閉じる"),
+                ("Esc", "絞り込みを解除して Items に戻る"),
+                ("b", "リンクをたどる前の Item に戻る"),
+                ("r / v", "Item を読み直す / モデルを検証する"),
+                ("q / Ctrl+C", "終了する（関係図では q で Body タブへ）"),
             ],
         ),
         (
-            "検索",
+            "Search",
             &[
                 ("/", "検索欄を開く"),
                 ("Enter / Esc", "検索を確定 / 取り消す"),
@@ -406,27 +574,31 @@ fn help_text() -> Text<'static> {
             ],
         ),
         (
-            "1 文書ツリー",
+            "[1] Items",
             &[
-                (
-                    "Enter / o / Space",
-                    "グループを開閉するか、文書から本文へ移る",
-                ),
+                ("Enter / o / Space", "グループを開閉するか、Body に移る"),
                 ("← / h", "グループを閉じるか、親グループに移る"),
-                ("→ / l", "グループを開くか、先頭の文書に移る"),
-                ("→ / l", "選択中の文書から本文へ移る"),
+                ("→ / l", "グループを開くか、先頭の Item に移る"),
+                ("→ / l", "選択中の Item から Body に移る"),
                 ("PageUp / PageDown / [ ]", "選択を画面単位で移す"),
             ],
         ),
         (
-            "2 本文",
+            "[2] Body",
             &[
-                ("← / h", "文書ツリーへ移る"),
+                ("[ / ]", "Body / Upstream / Downstream タブを切り替える"),
+                ("← / h", "Body タブから Items に移る"),
+                ("矢印 / hjkl", "Upstream・Downstream の図を移動する"),
+                ("左クリック", "図の ID や本文中のリンクを開く"),
                 ("o", "元の Markdown を $EDITOR で編集する"),
                 ("PageUp / PageDown", "本文を画面単位でスクロールする"),
+                ("Esc / q", "関係図から Body タブに戻る"),
             ],
         ),
-        ("3 関連文書", &[("Enter", "選択したリンクをたどる")]),
+        (
+            "[3] Related Items",
+            &[("Enter / o", "選択したリンクをたどる")],
+        ),
     ];
 
     let mut lines = Vec::new();
@@ -445,11 +617,6 @@ fn help_text() -> Text<'static> {
 
 fn draw_scroll(frame: &mut Frame, inner: Rect, text: Text<'_>, scroll: &mut Scroll) {
     let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
-    let limit = paragraph
-        .line_count(inner.width)
-        .saturating_sub(usize::from(inner.height));
-    scroll.height = inner.height;
-    scroll.limit = u16::try_from(limit).unwrap_or(u16::MAX);
-    scroll.offset = scroll.offset.min(scroll.limit);
+    scroll.set_viewport(paragraph.line_count(inner.width), inner.height);
     frame.render_widget(paragraph.scroll((scroll.offset, 0)), inner);
 }

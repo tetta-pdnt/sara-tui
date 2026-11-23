@@ -75,6 +75,21 @@ pub enum Direction {
     Peer,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Traversal {
+    Upstream,
+    Downstream,
+}
+
+impl Traversal {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Upstream => "Upstream",
+            Self::Downstream => "Downstream",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct Validation {
     pub valid: bool,
@@ -142,6 +157,37 @@ impl Sara {
 
     pub fn item(&self, id: &str) -> Result<Item> {
         self.call("sara_get_item", json!({"id": id}))
+    }
+
+    pub fn trace_mermaid(&self, id: &str, traversal: Traversal) -> Result<String> {
+        let direction = match traversal {
+            Traversal::Upstream => "--upstream",
+            Traversal::Downstream => "--downstream",
+        };
+        let output = Command::new("sara")
+            .args([
+                "query",
+                direction,
+                "--format",
+                "mermaid",
+                "--no-color",
+                "--no-emoji",
+                "--",
+                id,
+            ])
+            .current_dir(&self.project)
+            .output()
+            .context("sara query を起動できませんでした")?;
+        if !output.status.success() {
+            bail!(
+                "{} の関係図を取得できません（{}、{}）\n{}",
+                id,
+                traversal.label(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        String::from_utf8(output.stdout).context("Sara の Mermaid 出力を読み取れませんでした")
     }
 
     pub fn validate(&self) -> Result<Validation> {

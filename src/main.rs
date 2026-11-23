@@ -10,7 +10,10 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyEventKind, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
 
@@ -47,15 +50,19 @@ fn main() -> Result<()> {
     let mut app = App::new(Sara { project })?;
     let mut terminal = ratatui::try_init()?;
     let result = (|| -> Result<()> {
-        execute!(io::stdout(), EnableBracketedPaste)?;
+        execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
         loop {
             terminal.draw(|frame| ui::draw(frame, &mut app))?;
-            match event::read()? {
+            match read_event()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => match app.handle_key(key) {
                     Action::Continue => {}
                     Action::Quit => break,
                     Action::Edit => {
-                        execute!(terminal.backend_mut(), DisableBracketedPaste)?;
+                        execute!(
+                            terminal.backend_mut(),
+                            DisableMouseCapture,
+                            DisableBracketedPaste
+                        )?;
                         ratatui::try_restore()?;
                         terminal.show_cursor()?;
                         let result = app.edit_current();
@@ -63,22 +70,39 @@ fn main() -> Result<()> {
                         execute!(
                             terminal.backend_mut(),
                             EnterAlternateScreen,
-                            EnableBracketedPaste
+                            EnableBracketedPaste,
+                            EnableMouseCapture
                         )?;
                         terminal.clear()?;
                         app.report_error(result);
                     }
                 },
                 Event::Paste(text) => app.paste(&text),
+                Event::Mouse(mouse) => app.handle_mouse(mouse),
                 _ => {}
             }
         }
         Ok(())
     })();
-    let disable_paste = execute!(io::stdout(), DisableBracketedPaste);
+    let disable_input = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     let restore = ratatui::try_restore();
     result?;
-    disable_paste?;
+    disable_input?;
     restore?;
     Ok(())
+}
+
+fn read_event() -> io::Result<Event> {
+    loop {
+        let event = event::read()?;
+        if !matches!(
+            event,
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved | MouseEventKind::Drag(_) | MouseEventKind::Up(_),
+                ..
+            })
+        ) {
+            return Ok(event);
+        }
+    }
 }
